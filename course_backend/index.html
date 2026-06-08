@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多账户课程表</title>
+    <style>
+        :root {
+            --primary-green: #4a7c59;
+            --light-green: #f4f9f4;
+            --border-color: #cbd5e1;
+            --text-main: #334155;
+            --text-muted: #64748b;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; background-color: #fafbfc; color: var(--text-main); padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .title-bar { text-align: center; margin-bottom: 20px; display: flex; justify-content: center; align-items: center; gap: 15px; }
+        .title-box { background-color: var(--light-green); color: var(--primary-green); font-size: 20px; font-weight: bold; padding: 8px 30px; border-radius: 4px; border: 1px solid #e2ece2; }
+        .week-btn { background: white; border: 1px solid var(--primary-green); color: var(--primary-green); padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+        .week-btn:hover { background: var(--light-green); }
+        .account-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+        .panel-title { font-size: 14px; font-weight: bold; color: var(--primary-green); margin-bottom: 12px; }
+        .account-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 15px; background: #f8fafc; padding: 10px; border-radius: 6px; }
+        .account-form input { padding: 6px 10px; border: 1px solid var(--border-color); border-radius: 4px; font-size: 13px; outline: none; }
+        .account-form input.input-field { width: 180px; }
+        .btn-add { background: var(--primary-green); color: white; border: none; padding: 6px 20px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; }
+        .btn-add:hover { opacity: 0.9; }
+        .account-tags { display: flex; flex-wrap: wrap; gap: 8px; }
+        .account-tag { display: flex; align-items: center; background: #f1f5f9; border: 1px solid #e2e8f0; padding: 5px 14px; border-radius: 20px; font-size: 13px; cursor: pointer; transition: all 0.2s; }
+        .account-tag:hover { background: #e2e8f0; }
+        .account-tag.active { background-color: var(--light-green); border-color: #b7e1cd; color: #137333; font-weight: bold; }
+        .account-tag .btn-del { margin-left: 8px; color: #94a3b8; font-size: 14px; }
+        .account-tag .btn-del:hover { color: #ef4444; }
+        .table-wrapper { background: #fff; border: 1px solid var(--primary-green); border-radius: 4px; overflow-x: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.04); }
+        .schedule-table { width: 100%; border-collapse: collapse; table-layout: fixed; text-align: center; min-width: 950px; }
+        .schedule-table th, .schedule-table td { border: 1px solid #cbd5e1; padding: 8px 4px; vertical-align: middle; }
+        .table-header th { background-color: var(--light-green); color: var(--primary-green); font-weight: bold; font-size: 15px; height: 50px; }
+        .th-time { width: 70px; } .th-section { width: 100px; }
+        .period-td { background-color: var(--light-green); color: var(--primary-green); font-weight: bold; font-size: 15px; width: 70px; letter-spacing: 2px; line-height: 1.5; }
+        .section-td { background-color: #fff; font-size: 13px; color: var(--text-main); line-height: 1.4; }
+        .section-name { font-weight: bold; color: #1e293b; }
+        .section-time { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-family: monospace; }
+        .slot-td { background-color: #fff; position: relative; height: 85px; }
+        .slot-empty { color: #e2e8f0; font-size: 18px; font-weight: 300; user-select: none; }
+        .course-card { background-color: #e6f4ea; border: 1px solid #b7e1cd; color: #137333; border-radius: 6px; padding: 6px 4px; height: 100%; display: flex; flex-direction: column; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        .c-name { font-weight: bold; font-size: 12px; line-height: 1.3; margin-bottom: 2px; word-break: break-all; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .c-teacher { font-size: 11px; color: #1e8e3e; margin-bottom: 2px; }
+        .c-room { font-size: 10px; background-color: #ffffff; border: 1px solid #a3cfb6; padding: 1px 4px; border-radius: 3px; color: #116930; font-weight: 50px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .loading { text-align: center; font-size: 15px; color: var(--text-muted); padding: 40px; background: white; border: 1px solid #e2e8f0; border-radius: 4px; }
+        
+        .btn-refresh { background: white; border: 1px solid #94a3b8; color: var(--text-muted); padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 10px; }
+        .btn-refresh:hover { background: #f1f5f9; color: #1e293b; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="account-card">
+        <div class="panel-title">👥 快捷账户切换 (密码安全留存在本地，缓存由后端统一调度)</div>
+        <div class="account-form">
+            <input type="text" id="inRemark" class="input-field" placeholder="备注姓名 (如: 张三)">
+            <input type="text" id="inUser" class="input-field" placeholder="学号">
+            <input type="password" id="inPass" class="input-field" placeholder="教务系统密码">
+            <button class="btn-add" onclick="addAccount()">保存账户</button>
+        </div>
+        <div class="account-tags" id="accountTagsContainer"></div>
+    </div>
+
+    <div class="title-bar">
+        <button class="week-btn" onclick="changeWeek(-1)">上一周</button>
+        <div class="title-box" id="scheduleTitle">请选择或添加一个账户</div>
+        <button class="week-btn" onclick="changeWeek(1)">下一周</button>
+        <button class="btn-refresh" id="btnRefresh" style="display:none;" onclick="forceRefreshSchedule()">🔄 强制同步学校</button>
+    </div>
+
+    <div id="loadingStatus" class="loading">请在上方输入并选择账户查看课表。</div>
+
+    <div class="table-wrapper" id="tableWrapper" style="display: none;">
+        <table class="schedule-table">
+            <thead>
+                <tr class="table-header">
+                    <th class="th-time">时间</th> <th class="th-section">课时</th>
+                    <th>周一</th> <th>周二</th> <th>周三</th> <th>周四</th> <th>周五</th> <th>周六</th> <th>周日</th>
+                </tr>
+            </thead>
+            <tbody id="tableBody"></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    const API_BASE = "/api/schedule";
+    let accountsList = [];
+    let activeAccountIndex = -1;
+    let currentDisplayWeek = 0;
+    const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+    const SECTION_STRUCTURE = [
+        { period: "上午", label: "第一节", physical: 1, isPeriodStart: true, periodSpan: 4, start: "8:00", end: "8:45" },
+        { period: "上午", label: "第二节", physical: 2, isPeriodStart: false, start: "8:55", end: "9:40" },
+        { period: "上午", label: "第三节", physical: 3, isPeriodStart: false, start: "10:00", end: "10:45" },
+        { period: "上午", label: "第四节", physical: 4, isPeriodStart: false, start: "10:55", end: "11:40" },
+        { period: "下午", label: "第五节", physical: 5, isPeriodStart: true, periodSpan: 5, start: "14:00", end: "14:45" },
+        { period: "下午", label: "第六节", physical: 6, isPeriodStart: false, start: "14:50", end: "15:35" },
+        { period: "下午", label: "第七节", physical: 7, isPeriodStart: false, start: "15:40", end: "16:25" },
+        { period: "下午", label: "第八节", physical: 8, isPeriodStart: false, start: "16:45", end: "17:30" },
+        { period: "下午", label: "第九节", physical: 9, isPeriodStart: false, start: "17:35", end: "18:20" },
+        { period: "晚上", label: "第十节", physical: 10, isPeriodStart: true, periodSpan: 3, start: "18:55", end: "19:40" },
+        { period: "晚上", label: "第十一节", physical: 11, isPeriodStart: false, start: "19:50", end: "20:35" },
+        { period: "晚上", label: "第十二节", physical: 12, isPeriodStart: false, start: "20:45", end: "21:30" }
+    ];
+
+    function init() {
+        const cached = localStorage.getItem("aqnu_multi_accounts_v4");
+        accountsList = cached ? JSON.parse(cached) : [];
+        renderAccountTags();
+        if (accountsList.length > 0) selectAccount(0);
+    }
+
+    function renderAccountTags() {
+        const container = document.getElementById("accountTagsContainer");
+        container.innerHTML = "";
+        if (accountsList.length === 0) {
+            container.innerHTML = `<span style="font-size:13px; color:#94a3b8;">暂无保存的快捷账户，请在上方输入添加</span>`;
+            return;
+        }
+        accountsList.forEach((acc, idx) => {
+            const tag = document.createElement("div");
+            tag.className = `account-tag ${idx === activeAccountIndex ? 'active' : ''}`;
+            tag.onclick = (e) => { if (e.target.className !== 'btn-del') selectAccount(idx); };
+            tag.innerHTML = `<span>${acc.remark} (${acc.username})</span><span class="btn-del" onclick="deleteAccount(${idx}, event)">×</span>`;
+            container.appendChild(tag);
+        });
+    }
+
+    function addAccount() {
+        const remark = document.getElementById("inRemark").value.trim();
+        const username = document.getElementById("inUser").value.trim();
+        const password = document.getElementById("inPass").value.trim();
+
+        if (!remark || !username || !password) {
+            alert("请完整填写 备注、学号 和 密码！");
+            return;
+        }
+
+        accountsList.push({ remark, username, password });
+        localStorage.setItem("aqnu_multi_accounts_v4", JSON.stringify(accountsList));
+
+        document.getElementById("inRemark").value = "";
+        document.getElementById("inUser").value = "";
+        document.getElementById("inPass").value = "";
+
+        renderAccountTags();
+        selectAccount(accountsList.length - 1);
+    }
+
+    function deleteAccount(idx, event) {
+        event.stopPropagation();
+        if (confirm(`确定要删除账户 [${accountsList[idx].remark}] 吗？`)) {
+            accountsList.splice(idx, 1);
+            localStorage.setItem("aqnu_multi_accounts_v4", JSON.stringify(accountsList));
+            if (activeAccountIndex === idx) {
+                activeAccountIndex = -1;
+                document.getElementById("tableWrapper").style.display = "none";
+                document.getElementById("loadingStatus").style.display = "block";
+                document.getElementById("loadingStatus").innerText = "请在上方选择一个存入的账户快速查阅课表。";
+                document.getElementById("scheduleTitle").innerText = "请选择或添加一个账户";
+                document.getElementById("btnRefresh").style.display = "none";
+            } else if (activeAccountIndex > idx) {
+                activeAccountIndex--;
+            }
+            renderAccountTags();
+        }
+    }
+
+    function selectAccount(idx) {
+        activeAccountIndex = idx;
+        renderAccountTags();
+        document.getElementById("btnRefresh").style.display = "inline-block";
+        loadSchedule(0);
+    }
+
+    async function loadSchedule(targetWeek = 0) {
+        if (activeAccountIndex === -1 || accountsList.length === 0) return;
+        const acc = accountsList[activeAccountIndex];
+
+        // 彻底移除老旧的前端 LocalStorage 拦截机制，统一交由宝塔后端调度控制
+        await fetchScheduleFromNetwork(acc, targetWeek);
+    }
+
+    async function fetchScheduleFromNetwork(acc, targetWeek) {
+        document.getElementById("loadingStatus").style.display = "block";
+        document.getElementById("loadingStatus").innerText = `正在连接后端代理并同步 [${acc.remark}] 的最新课表...`;
+        document.getElementById("tableWrapper").style.display = "none";
+
+        try {
+            const payload = { username: acc.username, password: acc.password };
+            if (targetWeek > 0) payload.week = targetWeek;
+
+            const response = await fetch(API_BASE, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            const res = await response.json();
+
+            if (response.ok && res.schedule) {
+                currentDisplayWeek = res.selectedWeek;
+
+                // 根据后端下发的状态标记，动态修正顶部的标题提示
+                let statusBadge = "";
+                if (res.is_cache) {
+                    statusBadge = " (10min高频保护锁)";
+                } else if (res.is_fallback) {
+                    statusBadge = " (教务网崩溃·离线残像)";
+                }
+
+                document.getElementById("scheduleTitle").innerText = `[${acc.remark}] ${res.semesterName} 第 ${res.selectedWeek} 周${statusBadge}`;
+
+                renderGrid(res.schedule);
+                document.getElementById("loadingStatus").style.display = "none";
+                document.getElementById("tableWrapper").style.display = "block";
+            } else {
+                document.getElementById("loadingStatus").innerText = "获取失败: " + (res.msg || "未知鉴权拒绝");
+            }
+        } catch (error) {
+            document.getElementById("loadingStatus").innerText = "核心报错：未能成功建立与宝塔后端应用服务器的连接。";
+        }
+    }
+
+    function forceRefreshSchedule() {
+        if (activeAccountIndex === -1) return;
+        const acc = accountsList[activeAccountIndex];
+        fetchScheduleFromNetwork(acc, currentDisplayWeek);
+    }
+
+    function changeWeek(step) {
+        if (activeAccountIndex === -1) return;
+        loadSchedule(currentDisplayWeek + step);
+    }
+
+    function renderGrid(scheduleData) {
+        const matrix = Array.from({ length: 7 }, () => Array(12).fill(null));
+        WEEKDAYS.forEach((day, dayIdx) => {
+            const list = scheduleData[day] || [];
+            list.forEach(course => {
+                const startIdx = course.start - 1;
+                const span = course.end - course.start + 1;
+                matrix[dayIdx][startIdx] = { name: course.course, teacher: course.teacher, room: course.room, span: span };
+                for (let s = course.start; s < course.end; s++) matrix[dayIdx][s] = "occupied";
+            });
+        });
+
+        const tbody = document.getElementById("tableBody");
+        tbody.innerHTML = "";
+        SECTION_STRUCTURE.forEach((struct) => {
+            const row = document.createElement("tr");
+            if (struct.isPeriodStart) {
+                const periodTd = document.createElement("td");
+                periodTd.className = "period-td"; periodTd.rowSpan = struct.periodSpan; periodTd.innerText = struct.period;
+                row.appendChild(periodTd);
+            }
+            const sectionTd = document.createElement("td");
+            sectionTd.className = "section-td";
+            sectionTd.innerHTML = `<div class="section-name">${struct.label}</div><div class="section-time">${struct.start}-${struct.end}</div>`;
+            row.appendChild(sectionTd);
+
+            for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
+                const cellData = matrix[dayIdx][struct.physical - 1];
+                if (cellData === "occupied") continue;
+                const slotTd = document.createElement("td");
+                slotTd.className = "slot-td";
+                if (cellData) {
+                    slotTd.rowSpan = cellData.span;
+                    slotTd.innerHTML = `
+                        <div class="course-card">
+                            <div class="c-name" title="${cellData.name}">${cellData.name}</div>
+                            <div class="c-teacher" title="${cellData.teacher}">${cellData.teacher}</div>
+                            <div class="c-room" title="${cellData.room}">${cellData.room}</div>
+                        </div>`;
+                } else {
+                    slotTd.className = "slot-td slot-empty"; slotTd.innerText = "+";
+                }
+                row.appendChild(slotTd);
+            }
+            tbody.appendChild(row);
+        });
+    }
+    window.onload = init;
+</script>
+</body>
+</html>
