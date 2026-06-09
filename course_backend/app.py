@@ -60,7 +60,7 @@ def get_schedule():
         username = str(req_data.get('username', '')).strip()
         password = str(req_data.get('password', ''))
         req_week = req_data.get('week')
-        mode = req_data.get('mode', 'snapshot')  # 新增模式参数：snapshot 或 network
+        mode = req_data.get('mode', 'snapshot')
 
         if not username or not password:
             return jsonify({"code": 400, "msg": "请求失败：学号和密码不能为空！"}), 400
@@ -82,12 +82,11 @@ def get_schedule():
             if not has_cache or not local_cache:
                 return jsonify({"code": 204, "msg": "本地无快照，需要完整建立教务同步"}), 200
 
-            # 严格核对影子凭证锁，防止路人撞库恶意试探
             if current_auth_hash != local_cache.get("shadow_auth"):
                 return jsonify({"code": 401, "msg": "凭证与本地离线记录不匹配"}), 401
 
             last_fetch_time = local_cache.get("last_fetch_time", 0)
-            is_fresh = (time.time() - last_fetch_time < 600)  # 10分钟高频保护判定
+            is_fresh = (time.time() - last_fetch_time < 600)
 
             resp_payload = local_cache.get("schedule_data", {})
             resp_payload["status"] = "fresh" if is_fresh else "stale"
@@ -97,38 +96,16 @@ def get_schedule():
         if mode == 'network':
             try:
                 session = requests.Session()
-                login_result = login(session, username, password)
+                # 注入行业标准浏览器 User-Agent，防止部分教务组件对空网头返回截断数据
+                session.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                })
 
-                # 学校在线，且明确返回了账密错误
+                login_result = login(session, username, password)
                 if not login_result.get("result", False):
                     return jsonify({"code": 401, "msg": "教务系统登录失败，请检查学号和密码是否正确"}), 401
 
-                # 登录成功，正常的抓取流程
-                std_person_id = None
-                try:
-                    notif_resp = session.post(f"{BASE_URL}/student/ws/notification/get-alert-notifications", json={}, timeout=4)
-                    if notif_resp.status_code != 200:
-                        notif_resp = session.get(f"{BASE_URL}/student/ws/notification/get-alert-notifications", timeout=4)
-                    id_match = re.search(r'"personAssoc"\s*:\s*(\d{5,8})', notif_resp.text)
-                    if id_match:
-                        std_person_id = int(id_match.group(1))
-                except:
-                    pass
-
-                if not std_person_id:
-                    try:
-                        menu_resp = session.post(f"{BASE_URL}/student/ws/menu/get-menus", json={}, timeout=4)
-                        if menu_resp.status_code != 200:
-                            menu_resp = session.get(f"{BASE_URL}/student/ws/menu/get-menus", timeout=4)
-                        id_match = re.search(r'stdPersonId=(\d{5,8})', menu_resp.text)
-                        if id_match:
-                            std_person_id = int(id_match.group(1))
-                    except:
-                        pass
-
-                if not std_person_id:
-                    return jsonify({"code": 500, "msg": "未能自动解析到该学生的人员内部ID(stdPersonId)。"}), 500
-
+                # 1. 优先拉取课表主页面和基础数据包
                 page_resp = session.get(f"{BASE_URL}/student/for-std/course-table?bizTypeId=2", timeout=5)
                 html_content = page_resp.text
 
@@ -149,9 +126,50 @@ def get_schedule():
                 if not semester:
                     return jsonify({"code": 500, "msg": "当前时间未落在教务系统的任何学期范围内"}), 500
 
+                # 2. 顺势调取基础学期及课程ID数据包
                 resp = session.get(f"{BASE_URL}/student/for-std/course-table/get-data", params={"bizTypeId": 2, "semesterId": semester["id"]}, timeout=5)
                 course_data = resp.json()
 
+                # 3. 三路联合防御打捞 stdPersonId
+                std_person_id = None
+                id_patterns = [
+                    r'stdPersonId["\']?\s*[:=]\s*["\']?(\d+)',
+                    r'studentId["\']?\s*[:=]\s*["\']?(\d+)',
+                    r'personId["\']?\s*[:=]\s*["\']?(\d+)',
+                    r'stdPersonId=(\d+)',
+                    r'studentId=(\d+)'
+                ]
+
+                # 策略 A：从已拉回的主 HTML 源码中深度指纹匹配
+                for pattern in id_patterns:
+                    match = re.search(pattern, html_content, re.IGNORECASE)
+                    if match:
+                        std_person_id = int(match.group(1))
+                        break
+
+                # 策略 B：检查 course_data JSON 返回字典中是否自带学籍主体标识
+                if not std_person_id and isinstance(course_data, dict):
+                    for key in ["studentId", "stdPersonId", "personId", "id"]:
+                        if key in course_data and course_data[key]:
+                            std_person_id = int(course_data[key])
+                            break
+
+                # 策略 C：传统兜底，对侧边菜单接口发起捞取
+                if not std_person_id:
+                    try:
+                        menu_resp = session.post(f"{BASE_URL}/student/ws/menu/get-menus", json={}, timeout=3)
+                        for pattern in id_patterns:
+                            match = re.search(pattern, menu_resp.text, re.IGNORECASE)
+                            if match:
+                                std_person_id = int(match.group(1))
+                                break
+                    except:
+                        pass
+
+                if not std_person_id:
+                    return jsonify({"code": 500, "msg": "教务系统策略更新：未能自动解析到该学生的人员内部ID(stdPersonId)。"}), 500
+
+                # 4. 执行最终课表矩阵数据获取
                 if not req_week:
                     req_week = course_data["currentWeek"]
 
@@ -203,7 +221,7 @@ def get_schedule():
                     "status": "fresh"
                 }
 
-                # 覆盖写入本地安全沙盒
+                # 同步回本地沙盒快照
                 serialized_cache = {
                     "shadow_auth": current_auth_hash,
                     "last_fetch_time": time.time(),
@@ -215,24 +233,10 @@ def get_schedule():
                 return jsonify(success_payload), 200
 
             except requests.exceptions.RequestException:
-                # 学校崩溃！执行战时残像防御降级
                 if has_cache and local_cache:
                     if current_auth_hash == local_cache.get("shadow_auth"):
                         fallback_payload = local_cache.get("schedule_data", {})
                         fallback_payload["status"] = "jwxt_collapsed"
                         return jsonify(fallback_payload), 200
                     else:
-                        return jsonify({"code": 401, "msg": "教务网突发故障，且输入的凭证错误，拒绝访问离线数据。"}), 401
-                else:
-                    return jsonify({"code": 502, "msg": "教务网故障，且本地沙盒无离线快照记录。"}), 502
-
-    except Exception as server_err:
-        return jsonify({
-            "code": 500,
-            "msg": f"后端运行时遭遇致命崩溃: {str(server_err)}",
-            "traceback": traceback.format_exc()
-        }), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
-                                                                                                                                                                                                                                                                                
+                        return jsonify({"code": 401, "msg": "教务网突发故障，且输入的
