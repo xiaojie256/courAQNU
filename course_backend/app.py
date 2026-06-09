@@ -37,20 +37,20 @@ def login(session: requests.Session, username, password) -> dict:
     except:
         return {"result": False, "raw_text": resp.text[:200]}
 
-def minutes_since_midnight(time_val: int) -> int:
+def hhmm_to_minutes(time_val: int) -> int:
     if time_val is None: return 0
     return (time_val // 100) * 60 + (time_val % 100)
 
 def get_start_section(start_time: int) -> int:
     start_map = {800: 1, 855: 2, 1000: 3, 1055: 4, 1400: 5, 1450: 6, 1540: 7, 1645: 8, 1735: 9, 1855: 10, 1950: 11, 2045: 12}
-    target_min = minutes_since_midnight(start_time)
-    closest_time = min(start_map.keys(), key=lambda k: abs(minutes_since_midnight(k) - target_min))
+    target_min = hhmm_to_minutes(start_time)
+    closest_time = min(start_map.keys(), key=lambda k: abs(hhmm_to_minutes(k) - target_min))
     return start_map[closest_time]
 
 def get_end_section(end_time: int) -> int:
     end_map = {845: 1, 940: 2, 1045: 3, 1140: 4, 1445: 5, 1535: 6, 1625: 7, 1730: 8, 1820: 9, 1940: 10, 2035: 11, 2130: 12}
-    target_min = minutes_since_midnight(end_time)
-    closest_time = min(end_map.keys(), key=lambda k: abs(minutes_since_midnight(k) - target_min))
+    target_min = hhmm_to_minutes(end_time)
+    closest_time = min(end_map.keys(), key=lambda k: abs(hhmm_to_minutes(k) - target_min))
     return end_map[closest_time]
 
 @app.route('/api/schedule', methods=['POST'])
@@ -138,10 +138,8 @@ def get_schedule():
                     r'stdPersonId["\']?\s*[:=]\s*["\']?(\d+)',
                     r'studentId["\']?\s*[:=]\s*["\']?(\d+)',
                     r'personId["\']?\s*[:=]\s*["\']?(\d+)',
-                    r'accountAssoc["\']?\s*[:=]\s*["\']?(\d+)',
                     r'stdPersonId=(\d+)',
-                    r'studentId=(\d+)',
-                    r'accountAssoc=(\d+)'
+                    r'studentId=(\d+)'
                 ]
                 for pattern in id_patterns:
                     match = re.search(pattern, html_content, re.IGNORECASE)
@@ -156,15 +154,19 @@ def get_schedule():
                             std_person_id = int(course_data[key])
                             break
 
-                # 策略 C：穿透调取个人学籍中心页面进行指纹捞取
+                # 策略 C：穿透调取学籍页面，利用内容及重定向 URL 双重解构指纹
                 if not std_person_id:
                     try:
-                        info_resp = session.get(f"{BASE_URL}/student/student-info", timeout=3)
-                        for pattern in id_patterns + [r'id=(\d+)']:
-                            match = re.search(pattern, info_resp.text, re.IGNORECASE)
-                            if match:
-                                std_person_id = int(match.group(1))
-                                break
+                        info_resp = session.get(f"{BASE_URL}/student/for-std/student-info", timeout=3)
+                        url_match = re.search(r'/index/(\d+)', info_resp.url)
+                        if url_match:
+                            std_person_id = int(url_match.group(1))
+                        else:
+                            for pattern in id_patterns + [r'id=(\d+)', r'["\']?id["\']?\s*[:=]\s*["\']?(\d+)']:
+                                match = re.search(pattern, info_resp.text, re.IGNORECASE)
+                                if match:
+                                    std_person_id = int(match.group(1))
+                                    break
                     except:
                         pass
 
@@ -180,21 +182,11 @@ def get_schedule():
                     except:
                         pass
 
-                # 策略 E：专门攻坚纯净变异账号！直奔首页账户信息接口打捞 accountAssoc
-                if not std_person_id:
-                    try:
-                        assoc_resp = session.get(f"{BASE_URL}/student/home/get-account-login-info", timeout=3)
-                        assoc_data = assoc_resp.json()
-                        if "accountAssoc" in assoc_data and assoc_data["accountAssoc"]:
-                            std_person_id = int(assoc_data["accountAssoc"])
-                    except:
-                        pass
-
                 # Fail-Closed 核心卡口：宁可报错拒绝，也绝不借用错位 ID
                 if not std_person_id:
                     return jsonify({
                         "code": 500,
-                        "msg": f"解析失败：当前账号 [{username}] 成功通过学校鉴权，但教务系统未在返回的网页源码及接口中暴露学籍人员内部ID(stdPersonId)。为保障隐私隔离，拒绝下发数据。"
+                        "msg": f"解析失败：当前账号 [{username}] 成功通过学校鉴权，但教务系统未在返回的网页源码及学籍链路中暴露物理人员课表ID(stdPersonId)。"
                     }), 500
 
                 if not req_week:
@@ -235,4 +227,15 @@ def get_schedule():
                         "start": start_section,
                         "end": end_section,
                         "course": lesson.get("courseName", ""),
-                        "teacher": ", ".join([t["na
+                        "teacher": ", ".join([t["name"] for t in lesson.get("teacherAssignmentList", [])]),
+                        "room": room_info
+                    })
+
+                success_payload = {
+                    "code": 200,
+                    "semesterName": semester['nameZh'],
+                    "currentWeek": course_data["currentWeek"],
+                    "selectedWeek": req_week,
+                    "schedule": matrix,
+                    "status": "fresh"
+       
