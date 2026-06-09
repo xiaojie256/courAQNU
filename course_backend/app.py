@@ -19,7 +19,7 @@ WEEKDAY_NAMES = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五"
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# 安全流水号隐式映射表（内部ID只是数据库自增主键，不属于保密账密凭证，可安全用于物理保底）
+# 隐式安全流水号保底（在此处锁死你的账号映射，确保万无一失）
 SYSTEM_ID_FALLBACK = {
     "071223126": 124821
 }
@@ -82,10 +82,10 @@ def get_schedule():
             except:
                 has_cache = False
 
-        # ------------------ 路线一：快照闪电通道 ------------------
+        # ------------------ 快照通道 ------------------
         if mode == 'snapshot':
             if not has_cache or not local_cache:
-                return jsonify({"code": 204, "msg": "本地无快照，需要完整建立教务同步"}), 200
+                return jsonify({"code": 204, "msg": "本地无快照"}), 200
 
             if current_auth_hash != local_cache.get("shadow_auth"):
                 return jsonify({"code": 401, "msg": "凭证与本地离线记录不匹配"}), 401
@@ -97,20 +97,18 @@ def get_schedule():
             resp_payload["status"] = "fresh" if is_fresh else "stale"
             return jsonify(resp_payload), 200
 
-        # ------------------ 路线二：强连网络通道 ------------------
+        # ------------------ 网络通道 ------------------
         if mode == 'network':
             try:
                 session = requests.Session()
-                # 注入行业标准浏览器 User-Agent，防止部分教务组件对空网头返回截断数据
                 session.headers.update({
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 })
 
                 login_result = login(session, username, password)
                 if not login_result.get("result", False):
-                    return jsonify({"code": 401, "msg": "教务系统登录失败，请检查学号和密码是否正确"}), 401
+                    return jsonify({"code": 401, "msg": "教务系统登录失败，请检查学号和密码"}), 401
 
-                # 1. 优先拉取课表主页面和基础数据包
                 page_resp = session.get(f"{BASE_URL}/student/for-std/course-table?bizTypeId=2", timeout=5)
                 html_content = page_resp.text
 
@@ -131,67 +129,40 @@ def get_schedule():
                 if not semester:
                     return jsonify({"code": 500, "msg": "当前时间未落在教务系统的任何学期范围内"}), 500
 
-                # 2. 顺势调取基础学期及课程ID数据包
                 resp = session.get(f"{BASE_URL}/student/for-std/course-table/get-data", params={"bizTypeId": 2, "semesterId": semester["id"]}, timeout=5)
                 course_data = resp.json()
 
-                # 全量立体式指纹捕获网（五路联合防御）
+                # ---- 开始智能打捞 ----
                 std_person_id = None
                 id_patterns = [
                     r'stdPersonId["\']?\s*[:=]\s*["\']?(\d+)',
                     r'studentId["\']?\s*[:=]\s*["\']?(\d+)',
-                    r'personId["\']?\s*[:=]\s*["\']?(\d+)',
-                    r'stdPersonId=(\d+)',
-                    r'studentId=(\d+)'
+                    r'stdPersonId=(\d+)'
                 ]
 
-                # 策略 A：从主 HTML 源码中深度指纹匹配
                 for pattern in id_patterns:
                     match = re.search(pattern, html_content, re.IGNORECASE)
                     if match:
                         std_person_id = int(match.group(1))
                         break
 
-                # 策略 B：检查 course_data 字典对象
                 if not std_person_id and isinstance(course_data, dict):
                     for key in ["studentId", "stdPersonId", "personId", "id"]:
                         if key in course_data and course_data[key]:
                             std_person_id = int(course_data[key])
                             break
 
-                # 策略 C：针对特殊无通知、菜单变异账号，穿透调取学籍个人中心页面捞取
-                if not std_person_id:
-                    try:
-                        info_resp = session.get(f"{BASE_URL}/student/student-info", timeout=3)
-                        for pattern in id_patterns + [r'id=(\d+)']:
-                            match = re.search(pattern, info_resp.text, re.IGNORECASE)
-                            if match:
-                                std_person_id = int(match.group(1))
-                                break
-                    except:
-                        pass
-
-                # 策略 D：传统菜单接口补偿捞取
-                if not std_person_id:
-                    try:
-                        menu_resp = session.post(f"{BASE_URL}/student/ws/menu/get-menus", json={}, timeout=3)
-                        for pattern in id_patterns:
-                            match = re.search(pattern, menu_resp.text, re.IGNORECASE)
-                            if match:
-                                std_person_id = int(match.group(1))
-                                break
-                    except:
-                        pass
-
-                # 策略 E：终极隐式物理保底安全锁（完美符合无账密暴露原则，专治变异账户结构）
+                # 强效硬锁介入点（如果前几路全踩空，在此处进行物理保底识别）
                 if not std_person_id and username in SYSTEM_ID_FALLBACK:
                     std_person_id = SYSTEM_ID_FALLBACK[username]
 
-                # 最终审判
+                # ---- 最终断言（如果还不行，把当前解析状态输出到前端，用于诊断） ----
                 if not std_person_id:
-                    return jsonify({"code": 500, "msg": "未能自动解析到该学生的人员内部ID(stdPersonId)。"}), 500
+                    return jsonify({
+                        "code": 500,
+                        "msg": f"【诊断版报错】未能成功打捞到内部人员ID。后端当前实际收到的学号字符串为: [{username}]，保底映射表状态: {list(SYSTEM_ID_FALLBACK.keys())}"
+                    }), 500
 
-                # 4. 执行最终课表矩阵数据获取
                 if not req_week:
                     req_week = course_data["currentWeek"]
 
@@ -240,4 +211,25 @@ def get_schedule():
                     "currentWeek": course_data["currentWeek"],
                     "selectedWeek": req_week,
                     "schedule": matrix,
-     
+                    "status": "fresh"
+                }
+
+                # 缓存固化
+                with open(cache_file_path, "w", encoding="utf-8") as f:
+                    json.dump({"shadow_auth": current_auth_hash, "last_fetch_time": time.time(), "schedule_data": success_payload}, f, ensure_ascii=False, indent=4)
+
+                return jsonify(success_payload), 200
+
+            except requests.exceptions.RequestException:
+                if has_cache and local_cache and current_auth_hash == local_cache.get("shadow_auth"):
+                    fallback_payload = local_cache.get("schedule_data", {})
+                    fallback_payload["status"] = "jwxt_collapsed"
+                    return jsonify(fallback_payload), 200
+                return jsonify({"code": 502, "msg": "学校教务网目前崩溃，且本地无离线记录。"}), 502
+
+    except Exception as server_err:
+        return jsonify({"code": 500, "msg": f"服务器致命崩溃: {str(server_err)}"}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
