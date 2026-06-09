@@ -16,7 +16,6 @@ CORS(app)
 BASE_URL = "https://jwxt.aqnu.edu.cn"
 WEEKDAY_NAMES = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}
 
-# 自动在宝塔本地项目根目录下建立沙盒缓存文件夹
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -59,17 +58,16 @@ def get_schedule():
     try:
         req_data = request.get_json() or {}
         username = str(req_data.get('username', '')).strip()
-        password = req_data.get('password', '')
+        password = str(req_data.get('password', ''))
         req_week = req_data.get('week')
+        mode = req_data.get('mode', 'snapshot')  # 新增模式参数：snapshot 或 network
 
         if not username or not password:
             return jsonify({"code": 400, "msg": "请求失败：学号和密码不能为空！"}), 400
 
-        # 【核心安全防御】在本地计算本次请求的双因子影子凭证哈希
         current_auth_hash = hashlib.sha256(f"{username}_{password}".encode('utf-8')).hexdigest()
         cache_file_path = os.path.join(CACHE_DIR, f"{username}.json")
 
-        # 尝试读取属于该用户的本地专属沙盒数据
         has_cache = os.path.exists(cache_file_path)
         local_cache = None
         if has_cache:
@@ -79,155 +77,154 @@ def get_schedule():
             except:
                 has_cache = False
 
-        # ---- 阶梯一：10分钟内高频请求保护风控 ----
-        if has_cache and local_cache:
+        # ------------------ 路线一：快照闪电通道 ------------------
+        if mode == 'snapshot':
+            if not has_cache or not local_cache:
+                return jsonify({"code": 204, "msg": "本地无快照，需要完整建立教务同步"}), 200
+
+            # 严格核对影子凭证锁，防止路人撞库恶意试探
+            if current_auth_hash != local_cache.get("shadow_auth"):
+                return jsonify({"code": 401, "msg": "凭证与本地离线记录不匹配"}), 401
+
             last_fetch_time = local_cache.get("last_fetch_time", 0)
-            # 如果距离上一次成功抓取未满 10 分钟 (600秒)
-            if time.time() - last_fetch_time < 600:
-                # 必须过一道影子凭证卡口，严防他人拿着对的学号和错的密码来撞库
-                if current_auth_hash == local_cache.get("shadow_auth"):
-                    resp_payload = local_cache.get("schedule_data", {})
-                    resp_payload["is_cache"] = True  # 打上缓存标记
-                    return jsonify(resp_payload)
-                else:
-                    return jsonify({"code": 401, "msg": "请求过于频繁，且密码与本地记录不匹配，拒绝访问。"}), 401
+            is_fresh = (time.time() - last_fetch_time < 600)  # 10分钟高频保护判定
 
-        # ---- 阶梯二：越过缓存期，冲向学校教务网 ----
-        try:
-            session = requests.Session()
-            login_result = login(session, username, password)
+            resp_payload = local_cache.get("schedule_data", {})
+            resp_payload["status"] = "fresh" if is_fresh else "stale"
+            return jsonify(resp_payload), 200
 
-            # 情况 A：教务系统在线，但亲自判定了密码错误或账号不存在
-            if not login_result.get("result", False):
-                return jsonify({"code": 401, "msg": "教务系统登录失败，请检查学号和密码是否正确", "debug_login": login_result}), 401
-
-            # 情况 B：教务网正常，登录成功，开始多级特征智能抓取
-            std_person_id = None
-
-            # 梯队 1：从通知接口抓取
+        # ------------------ 路线二：强连网络通道 ------------------
+        if mode == 'network':
             try:
-                notif_resp = session.post(f"{BASE_URL}/student/ws/notification/get-alert-notifications", json={}, timeout=4)
-                if notif_resp.status_code != 200:
-                    notif_resp = session.get(f"{BASE_URL}/student/ws/notification/get-alert-notifications", timeout=4)
-                id_match = re.search(r'"personAssoc"\s*:\s*(\d{5,8})', notif_resp.text)
-                if id_match:
-                    std_person_id = int(id_match.group(1))
-            except:
-                pass
+                session = requests.Session()
+                login_result = login(session, username, password)
 
-            # 梯队 2：从系统菜单接口抠取
-            if not std_person_id:
+                # 学校在线，且明确返回了账密错误
+                if not login_result.get("result", False):
+                    return jsonify({"code": 401, "msg": "教务系统登录失败，请检查学号和密码是否正确"}), 401
+
+                # 登录成功，正常的抓取流程
+                std_person_id = None
                 try:
-                    menu_resp = session.post(f"{BASE_URL}/student/ws/menu/get-menus", json={}, timeout=4)
-                    if menu_resp.status_code != 200:
-                        menu_resp = session.get(f"{BASE_URL}/student/ws/menu/get-menus", timeout=4)
-                    id_match = re.search(r'stdPersonId=(\d{5,8})', menu_resp.text)
+                    notif_resp = session.post(f"{BASE_URL}/student/ws/notification/get-alert-notifications", json={}, timeout=4)
+                    if notif_resp.status_code != 200:
+                        notif_resp = session.get(f"{BASE_URL}/student/ws/notification/get-alert-notifications", timeout=4)
+                    id_match = re.search(r'"personAssoc"\s*:\s*(\d{5,8})', notif_resp.text)
                     if id_match:
                         std_person_id = int(id_match.group(1))
                 except:
                     pass
 
-            if not std_person_id:
-                return jsonify({"code": 500, "msg": "教务网在线，但多级特征扫描完毕未能自动解析到该学生人员内部ID(stdPersonId)。"}), 500
+                if not std_person_id:
+                    try:
+                        menu_resp = session.post(f"{BASE_URL}/student/ws/menu/get-menus", json={}, timeout=4)
+                        if menu_resp.status_code != 200:
+                            menu_resp = session.get(f"{BASE_URL}/student/ws/menu/get-menus", timeout=4)
+                        id_match = re.search(r'stdPersonId=(\d{5,8})', menu_resp.text)
+                        if id_match:
+                            std_person_id = int(id_match.group(1))
+                    except:
+                        pass
 
-            # 抓取学期元数据
-            page_resp = session.get(f"{BASE_URL}/student/for-std/course-table?bizTypeId=2")
-            html_content = page_resp.text
+                if not std_person_id:
+                    return jsonify({"code": 500, "msg": "未能自动解析到该学生的人员内部ID(stdPersonId)。"}), 500
 
-            sem_match = re.search(r"var semesters = JSON\.parse\(\s*'([^']+)'", html_content)
-            if not sem_match:
-                return jsonify({"code": 500, "msg": "无法从教务系统页面中提取学期配置元数据"}), 500
+                page_resp = session.get(f"{BASE_URL}/student/for-std/course-table?bizTypeId=2")
+                html_content = page_resp.text
 
-            semesters = json.loads(sem_match.group(1).replace('\\"', '"'))
-            now_dt = datetime.now()
-            semester = None
-            for sem in semesters:
-                start = datetime.strptime(sem["startDate"], "%Y-%m-%d")
-                end = datetime.strptime(sem["endDate"], "%Y-%m-%d")
-                if start <= now_dt <= end:
-                    semester = sem
-                    break
+                sem_match = re.search(r"var semesters = JSON\.parse\(\s*'([^']+)'", html_content)
+                if not sem_match:
+                    return jsonify({"code": 500, "msg": "无法从教务系统页面中提取学期配置元数据"}), 500
 
-            if not semester:
-                return jsonify({"code": 500, "msg": "当前时间未落在教务系统的任何学期范围内"}), 500
+                semesters = json.loads(sem_match.group(1).replace('\\"', '"'))
+                now_dt = datetime.now()
+                semester = None
+                for sem in semesters:
+                    start = datetime.strptime(sem["startDate"], "%Y-%m-%d")
+                    end = datetime.strptime(sem["endDate"], "%Y-%m-%d")
+                    if start <= now_dt <= end:
+                        semester = sem
+                        break
 
-            resp = session.get(f"{BASE_URL}/student/for-std/course-table/get-data", params={"bizTypeId": 2, "semesterId": semester["id"]})
-            course_data = resp.json()
+                if not semester:
+                    return jsonify({"code": 500, "msg": "当前时间未落在教务系统的任何学期范围内"}), 500
 
-            if not req_week:
-                req_week = course_data["currentWeek"]
+                resp = session.get(f"{BASE_URL}/student/for-std/course-table/get-data", params={"bizTypeId": 2, "semesterId": semester["id"]})
+                course_data = resp.json()
 
-            datum_payload = {
-                "lessonIds": course_data["lessonIds"],
-                "studentId": None,
-                "stdPersonId": int(std_person_id),
-                "weekIndex": int(req_week)
-            }
+                if not req_week:
+                    req_week = course_data["currentWeek"]
 
-            schedule_resp = session.post(f"{BASE_URL}/student/ws/schedule-table/datum", json=datum_payload, headers={"Content-Type": "application/json"})
-            schedule_data = schedule_resp.json()
+                datum_payload = {
+                    "lessonIds": course_data["lessonIds"],
+                    "studentId": None,
+                    "stdPersonId": int(std_person_id),
+                    "weekIndex": int(req_week)
+                }
 
-            lessons = schedule_data["result"]["lessonList"]
-            schedules = schedule_data["result"]["scheduleList"]
+                schedule_resp = session.post(f"{BASE_URL}/student/ws/schedule-table/datum", json=datum_payload, headers={"Content-Type": "application/json"})
+                schedule_data = schedule_resp.json()
 
-            lesson_map = {lesson["id"]: lesson for lesson in lessons}
-            matrix = {day: [] for day in WEEKDAY_NAMES.values()}
+                lessons = schedule_data["result"]["lessonList"]
+                schedules = schedule_data["result"]["scheduleList"]
 
-            for s in schedules:
-                day = WEEKDAY_NAMES.get(s["weekday"], "")
-                if not day: continue
-                lesson = lesson_map.get(s["lessonId"], {})
+                lesson_map = {lesson["id"]: lesson for lesson in lessons}
+                matrix = {day: [] for day in WEEKDAY_NAMES.values()}
 
-                room_info = "未知教室"
-                if s.get("room") and isinstance(s.get("room"), dict):
-                    room_info = s["room"].get("nameZh") or "未知教室"
-                elif s.get("roomName"):
-                    room_info = s.get("roomName")
+                for s in schedules:
+                    day = WEEKDAY_NAMES.get(s["weekday"], "")
+                    if not day: continue
+                    lesson = lesson_map.get(s["lessonId"], {})
 
-                start_section = get_start_section(s["startTime"])
-                end_section = get_end_section(s["endTime"])
-                if end_section < start_section: end_section = start_section
+                    room_info = "未知教室"
+                    if s.get("room") and isinstance(s.get("room"), dict):
+                        room_info = s["room"].get("nameZh") or "未知教室"
+                    elif s.get("roomName"):
+                        room_info = s.get("roomName")
 
-                matrix[day].append({
-                    "start": start_section,
-                    "end": end_section,
-                    "course": lesson.get("courseName", ""),
-                    "teacher": ", ".join([t["name"] for t in lesson.get("teacherAssignmentList", [])]),
-                    "room": room_info
-                })
+                    start_section = get_start_section(s["startTime"])
+                    end_section = get_end_section(s["endTime"])
+                    if end_section < start_section: end_section = start_section
 
-            success_payload = {
-                "code": 200,
-                "semesterName": semester['nameZh'],
-                "currentWeek": course_data["currentWeek"],
-                "selectedWeek": req_week,
-                "schedule": matrix
-            }
+                    matrix[day].append({
+                        "start": start_section,
+                        "end": end_section,
+                        "course": lesson.get("courseName", ""),
+                        "teacher": ", ".join([t["name"] for t in lesson.get("teacherAssignmentList", [])]),
+                        "room": room_info
+                    })
 
-            # 【冷冻锁同步】将最新的课表、影子凭证哈希和当前时间戳牢牢锁入用户的私有沙盒中
-            serialized_cache = {
-                "shadow_auth": current_auth_hash,
-                "last_fetch_time": time.time(),
-                "schedule_data": success_payload
-            }
-            with open(cache_file_path, "w", encoding="utf-8") as f:
-                json.dump(serialized_cache, f, ensure_ascii=False, indent=4)
+                success_payload = {
+                    "code": 200,
+                    "semesterName": semester['nameZh'],
+                    "currentWeek": course_data["currentWeek"],
+                    "selectedWeek": req_week,
+                    "schedule": matrix,
+                    "status": "fresh"
+                }
 
-            return jsonify(success_payload)
+                # 覆盖写入本地安全沙盒
+                serialized_cache = {
+                    "shadow_auth": current_auth_hash,
+                    "last_fetch_time": time.time(),
+                    "schedule_data": success_payload
+                }
+                with open(cache_file_path, "w", encoding="utf-8") as f:
+                    json.dump(serialized_cache, f, ensure_ascii=False, indent=4)
 
-        except requests.exceptions.RequestException:
-            # ---- 阶梯三：进入捕获：教务网彻底瘫痪/超时/502 ----
-            if has_cache and local_cache:
-                # 机主本人输入正确密码：哈希完美契合，安全降级吐出专属于他的残像
-                if current_auth_hash == local_cache.get("shadow_auth"):
-                    fallback_payload = local_cache.get("schedule_data", {})
-                    fallback_payload["is_fallback"] = True  # 打上战时残像降级标记
-                    return jsonify(fallback_payload)
+                return jsonify(success_payload), 200
+
+            except requests.exceptions.RequestException:
+                # 学校崩溃！执行战时残像防御降级
+                if has_cache and local_cache:
+                    if current_auth_hash == local_cache.get("shadow_auth"):
+                        fallback_payload = local_cache.get("schedule_data", {})
+                        fallback_payload["status"] = "jwxt_collapsed"
+                        return jsonify(fallback_payload), 200
+                    else:
+                        return jsonify({"code": 401, "msg": "教务网突发故障，且输入的凭证错误，拒绝访问离线数据。"}), 401
                 else:
-                    # 恶作剧/探路人（路人乙）输入了错密：影子凭证无情阻断，严防残像冒领与数据污染！
-                    return jsonify({"code": 401, "msg": "学校教务网目前崩溃，且您的凭证与本地离线记录不匹配，拒绝提供残像服务。"}), 401
-            else:
-                return jsonify({"code": 502, "msg": "网络故障：学校教务系统崩溃，且本地无该学号的课表残像记录，请稍后再试。"}), 502
+                    return jsonify({"code": 502, "msg": "教务网故障，且本地沙盒无离线快照记录。"}), 502
 
     except Exception as server_err:
         return jsonify({
@@ -238,3 +235,4 @@ def get_schedule():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+                                                                                                                                                                                                                                                                                                                                                  
