@@ -23,15 +23,15 @@ def sha1_encrypt(salt: str, password: str) -> str:
     return hashlib.sha1(f"{salt}-{password}".encode('utf-8')).hexdigest()
 
 def get_login_salt(session: requests.Session) -> str:
-    resp = session.get(f"{BASE_URL}/student/login-salt")
+    resp = session.get(f"{BASE_URL}/student/login-salt", timeout=5)
     return resp.text.strip()
 
 def login(session: requests.Session, username, password) -> dict:
-    session.get(f"{BASE_URL}/student/login")
+    session.get(f"{BASE_URL}/student/login", timeout=5)
     salt = get_login_salt(session)
     encrypted_password = sha1_encrypt(salt, password)
     data = {"username": username, "password": encrypted_password, "captcha": "", "terminal": "student"}
-    resp = session.post(f"{BASE_URL}/student/login", json=data, headers={"Content-Type": "application/json"})
+    resp = session.post(f"{BASE_URL}/student/login", json=data, headers={"Content-Type": "application/json"}, timeout=5)
     try:
         return resp.json()
     except:
@@ -129,7 +129,7 @@ def get_schedule():
                 if not std_person_id:
                     return jsonify({"code": 500, "msg": "未能自动解析到该学生的人员内部ID(stdPersonId)。"}), 500
 
-                page_resp = session.get(f"{BASE_URL}/student/for-std/course-table?bizTypeId=2")
+                page_resp = session.get(f"{BASE_URL}/student/for-std/course-table?bizTypeId=2", timeout=5)
                 html_content = page_resp.text
 
                 sem_match = re.search(r"var semesters = JSON\.parse\(\s*'([^']+)'", html_content)
@@ -149,7 +149,7 @@ def get_schedule():
                 if not semester:
                     return jsonify({"code": 500, "msg": "当前时间未落在教务系统的任何学期范围内"}), 500
 
-                resp = session.get(f"{BASE_URL}/student/for-std/course-table/get-data", params={"bizTypeId": 2, "semesterId": semester["id"]})
+                resp = session.get(f"{BASE_URL}/student/for-std/course-table/get-data", params={"bizTypeId": 2, "semesterId": semester["id"]}, timeout=5)
                 course_data = resp.json()
 
                 if not req_week:
@@ -162,7 +162,7 @@ def get_schedule():
                     "weekIndex": int(req_week)
                 }
 
-                schedule_resp = session.post(f"{BASE_URL}/student/ws/schedule-table/datum", json=datum_payload, headers={"Content-Type": "application/json"})
+                schedule_resp = session.post(f"{BASE_URL}/student/ws/schedule-table/datum", json=datum_payload, headers={"Content-Type": "application/json"}, timeout=5)
                 schedule_data = schedule_resp.json()
 
                 lessons = schedule_data["result"]["lessonList"]
@@ -235,4 +235,4 @@ def get_schedule():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-                                                                                                                                                                                                                                                                                                                                                  
+                                                                                                                                                                                                                                                                                
