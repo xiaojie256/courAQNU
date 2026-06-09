@@ -19,11 +19,6 @@ WEEKDAY_NAMES = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五"
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# 隐式安全流水号保底（在此处锁死你的账号映射，确保万无一失）
-SYSTEM_ID_FALLBACK = {
-    "071223126": 124821
-}
-
 def sha1_encrypt(salt: str, password: str) -> str:
     return hashlib.sha1(f"{salt}-{password}".encode('utf-8')).hexdigest()
 
@@ -82,11 +77,12 @@ def get_schedule():
             except:
                 has_cache = False
 
-        # ------------------ 快照通道 ------------------
+        # ------------------ 路线一：快照闪电通道 ------------------
         if mode == 'snapshot':
             if not has_cache or not local_cache:
-                return jsonify({"code": 204, "msg": "本地无快照"}), 200
+                return jsonify({"code": 204, "msg": "本地无残像快照，需要联网同步"}), 200
 
+            # 影子凭证严格对齐，错密休想读取本地缓存
             if current_auth_hash != local_cache.get("shadow_auth"):
                 return jsonify({"code": 401, "msg": "凭证与本地离线记录不匹配"}), 401
 
@@ -97,7 +93,7 @@ def get_schedule():
             resp_payload["status"] = "fresh" if is_fresh else "stale"
             return jsonify(resp_payload), 200
 
-        # ------------------ 网络通道 ------------------
+        # ------------------ 路线二：强连网络通道 ------------------
         if mode == 'network':
             try:
                 session = requests.Session()
@@ -109,6 +105,7 @@ def get_schedule():
                 if not login_result.get("result", False):
                     return jsonify({"code": 401, "msg": "教务系统登录失败，请检查学号和密码"}), 401
 
+                # 抓取课表主页
                 page_resp = session.get(f"{BASE_URL}/student/for-std/course-table?bizTypeId=2", timeout=5)
                 html_content = page_resp.text
 
@@ -129,38 +126,63 @@ def get_schedule():
                 if not semester:
                     return jsonify({"code": 500, "msg": "当前时间未落在教务系统的任何学期范围内"}), 500
 
+                # 获取关联字典数据
                 resp = session.get(f"{BASE_URL}/student/for-std/course-table/get-data", params={"bizTypeId": 2, "semesterId": semester["id"]}, timeout=5)
                 course_data = resp.json()
 
-                # ---- 开始智能打捞 ----
+                # 全量动态打捞引擎（零硬编码，捞不到就报错，宁死不污染）
                 std_person_id = None
+
+                # 策略 A：地毯式匹配 HTML 源码中所有的可能 ID 声明
                 id_patterns = [
                     r'stdPersonId["\']?\s*[:=]\s*["\']?(\d+)',
                     r'studentId["\']?\s*[:=]\s*["\']?(\d+)',
-                    r'stdPersonId=(\d+)'
+                    r'personId["\']?\s*[:=]\s*["\']?(\d+)',
+                    r'stdPersonId=(\d+)',
+                    r'studentId=(\d+)'
                 ]
-
                 for pattern in id_patterns:
                     match = re.search(pattern, html_content, re.IGNORECASE)
                     if match:
                         std_person_id = int(match.group(1))
                         break
 
+                # 策略 B：深度检索 course_data 响应对象的元数据键值
                 if not std_person_id and isinstance(course_data, dict):
                     for key in ["studentId", "stdPersonId", "personId", "id"]:
                         if key in course_data and course_data[key]:
                             std_person_id = int(course_data[key])
                             break
 
-                # 强效硬锁介入点（如果前几路全踩空，在此处进行物理保底识别）
-                if not std_person_id and username in SYSTEM_ID_FALLBACK:
-                    std_person_id = SYSTEM_ID_FALLBACK[username]
+                # 策略 C：穿透调取个人学籍中心页面进行指纹捞取
+                if not std_person_id:
+                    try:
+                        info_resp = session.get(f"{BASE_URL}/student/student-info", timeout=3)
+                        for pattern in id_patterns + [r'id=(\d+)']:
+                            match = re.search(pattern, info_resp.text, re.IGNORECASE)
+                            if match:
+                                std_person_id = int(match.group(1))
+                                break
+                    except:
+                        pass
 
-                # ---- 最终断言（如果还不行，把当前解析状态输出到前端，用于诊断） ----
+                # 策略 D：系统菜单接口做最后动态打捞
+                if not std_person_id:
+                    try:
+                        menu_resp = session.post(f"{BASE_URL}/student/ws/menu/get-menus", json={}, timeout=3)
+                        for pattern in id_patterns:
+                            match = re.search(pattern, menu_resp.text, re.IGNORECASE)
+                            if match:
+                                std_person_id = int(match.group(1))
+                                break
+                    except:
+                        pass
+
+                # Fail-Closed 核心卡口：宁可报错拒绝，也绝不借用错位 ID
                 if not std_person_id:
                     return jsonify({
                         "code": 500,
-                        "msg": f"【诊断版报错】未能成功打捞到内部人员ID。后端当前实际收到的学号字符串为: [{username}]，保底映射表状态: {list(SYSTEM_ID_FALLBACK.keys())}"
+                        "msg": f"解析失败：当前账号 [{username}] 成功通过学校鉴权，但教务系统未在返回的网页源码及接口中暴露学籍人员内部ID(stdPersonId)。为保障隐私隔离，拒绝下发数据。"
                     }), 500
 
                 if not req_week:
@@ -214,22 +236,8 @@ def get_schedule():
                     "status": "fresh"
                 }
 
-                # 缓存固化
-                with open(cache_file_path, "w", encoding="utf-8") as f:
-                    json.dump({"shadow_auth": current_auth_hash, "last_fetch_time": time.time(), "schedule_data": success_payload}, f, ensure_ascii=False, indent=4)
-
-                return jsonify(success_payload), 200
-
-            except requests.exceptions.RequestException:
-                if has_cache and local_cache and current_auth_hash == local_cache.get("shadow_auth"):
-                    fallback_payload = local_cache.get("schedule_data", {})
-                    fallback_payload["status"] = "jwxt_collapsed"
-                    return jsonify(fallback_payload), 200
-                return jsonify({"code": 502, "msg": "学校教务网目前崩溃，且本地无离线记录。"}), 502
-
-    except Exception as server_err:
-        return jsonify({"code": 500, "msg": f"服务器致命崩溃: {str(server_err)}"}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+                # 异步持久化到用户专属的沙盒残像中
+                serialized_cache = {
+                    "shadow_auth": current_auth_hash,
+                    "last_fetch_time": time.time(),
+                    "schedule_data": succ
