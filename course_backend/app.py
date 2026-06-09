@@ -37,20 +37,20 @@ def login(session: requests.Session, username, password) -> dict:
     except:
         return {"result": False, "raw_text": resp.text[:200]}
 
-def hhmm_to_minutes(time_val: int) -> int:
+def minutes_since_midnight(time_val: int) -> int:
     if time_val is None: return 0
     return (time_val // 100) * 60 + (time_val % 100)
 
 def get_start_section(start_time: int) -> int:
     start_map = {800: 1, 855: 2, 1000: 3, 1055: 4, 1400: 5, 1450: 6, 1540: 7, 1645: 8, 1735: 9, 1855: 10, 1950: 11, 2045: 12}
-    target_min = hhmm_to_minutes(start_time)
-    closest_time = min(start_map.keys(), key=lambda k: abs(hhmm_to_minutes(k) - target_min))
+    target_min = minutes_since_midnight(start_time)
+    closest_time = min(start_map.keys(), key=lambda k: abs(minutes_since_midnight(k) - target_min))
     return start_map[closest_time]
 
 def get_end_section(end_time: int) -> int:
     end_map = {845: 1, 940: 2, 1045: 3, 1140: 4, 1445: 5, 1535: 6, 1625: 7, 1730: 8, 1820: 9, 1940: 10, 2035: 11, 2130: 12}
-    target_min = hhmm_to_minutes(end_time)
-    closest_time = min(end_map.keys(), key=lambda k: abs(hhmm_to_minutes(k) - target_min))
+    target_min = minutes_since_midnight(end_time)
+    closest_time = min(end_map.keys(), key=lambda k: abs(minutes_since_midnight(k) - target_min))
     return end_map[closest_time]
 
 @app.route('/api/schedule', methods=['POST'])
@@ -138,8 +138,10 @@ def get_schedule():
                     r'stdPersonId["\']?\s*[:=]\s*["\']?(\d+)',
                     r'studentId["\']?\s*[:=]\s*["\']?(\d+)',
                     r'personId["\']?\s*[:=]\s*["\']?(\d+)',
+                    r'accountAssoc["\']?\s*[:=]\s*["\']?(\d+)',
                     r'stdPersonId=(\d+)',
-                    r'studentId=(\d+)'
+                    r'studentId=(\d+)',
+                    r'accountAssoc=(\d+)'
                 ]
                 for pattern in id_patterns:
                     match = re.search(pattern, html_content, re.IGNORECASE)
@@ -175,6 +177,16 @@ def get_schedule():
                             if match:
                                 std_person_id = int(match.group(1))
                                 break
+                    except:
+                        pass
+
+                # 策略 E：专门攻坚纯净变异账号！直奔首页账户信息接口打捞 accountAssoc
+                if not std_person_id:
+                    try:
+                        assoc_resp = session.get(f"{BASE_URL}/student/home/get-account-login-info", timeout=3)
+                        assoc_data = assoc_resp.json()
+                        if "accountAssoc" in assoc_data and assoc_data["accountAssoc"]:
+                            std_person_id = int(assoc_data["accountAssoc"])
                     except:
                         pass
 
@@ -223,21 +235,4 @@ def get_schedule():
                         "start": start_section,
                         "end": end_section,
                         "course": lesson.get("courseName", ""),
-                        "teacher": ", ".join([t["name"] for t in lesson.get("teacherAssignmentList", [])]),
-                        "room": room_info
-                    })
-
-                success_payload = {
-                    "code": 200,
-                    "semesterName": semester['nameZh'],
-                    "currentWeek": course_data["currentWeek"],
-                    "selectedWeek": req_week,
-                    "schedule": matrix,
-                    "status": "fresh"
-                }
-
-                # 异步持久化到用户专属的沙盒残像中
-                serialized_cache = {
-                    "shadow_auth": current_auth_hash,
-                    "last_fetch_time": time.time(),
-                    "schedule_data": succ
+                        "teacher": ", ".join([t["na
